@@ -91,13 +91,20 @@ class PictureGenerator:
                 
         return image 
     
+    def AdjustContrastBrightness(self, image, contrast, brightness):
+        image = np.int16(image)
+        image = image * (contrast/127+1) - contrast + brightness
+        image = np.clip(image, 0, 255)
+        image = np.uint8(image)
+        return image
+    
     def EnhanceContrast(self, image):
         image = cv2.cvtColor(image, cv2.COLOR_RGB2Lab)
         l_channel, a, b = cv2.split(image)
 
         # Applying CLAHE to L-channel
         # feel free to try different values for the limit and grid size:
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4,4))
         cl = clahe.apply(l_channel)
 
         # merge the CLAHE enhanced L-channel with the a and b channel
@@ -120,18 +127,53 @@ class PictureGenerator:
                 
         return np.array(hueTable)
     
-    def PerformKMeans(self, imagePath, resultPath, numClusters = 5, showColors = True, showImage = True):
-        #image = io.imread(imagePath)
-        #image = exposure.adjust_gamma(image = image, gamma = 2)
+    def OutlineColor(self, image, color):
+        # convert to hsv colorspace
+        hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
+    
+        hsv_color = cv2.cvtColor(np.reshape(color, (1,1,3)).astype('uint8'), cv2.COLOR_RGB2HSV)
+        hsv_color = np.reshape(hsv_color, (3,))
+        # find the colors within the boundaries
+        mask = cv2.inRange(hsv, hsv_color, hsv_color)
+        
+        # Find contours from the mask
+        contours, _ = cv2.findContours(mask.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        return contours
+    
+    def GenerateContourLabels(self, contours, label):
+        labels = list()
+        for c in contours:
+            # compute the center of the contour
+            M = cv2.moments(c)
+            if M["m00"] == 0:
+                continue
+            
+            if cv2.contourArea(c) < 100:
+                continue
+            
+            cX = int(M["m10"] / M["m00"])
+            cY = int(M["m01"] / M["m00"])
+            labels.append((cX, cY, label))
+            
+        return labels
+    
+    def SetAlpha(self, image, alpha_value):
+        r_channel, g_channel, b_channel   = cv2.split(image)
+        alpha_channel = np.ones(r_channel.shape, dtype=r_channel.dtype) * alpha_value
+        image_RGBA = cv2.merge((r_channel, g_channel, b_channel, alpha_channel))
+        return image_RGBA
+        
+        
+    def PerformKMeans(self, imagePath, resultPath, numClusters = 5, showColors = True, showImage = True, showNumbers = True, drawContours = True, addTransparency = True):
 
         # pre process original image
         image = cv2.imread(imagePath)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        image = self.EnhanceContrast(image)
-        image = cv2.cvtColor(image, cv2.COLOR_RGB2HLS)
-        
-        hue_array = self.GetHueArray(image)
-    
+        image = self.AdjustContrastBrightness(image, 50, 0)
+        #plt.imshow(image)  
+        image = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
+        #image = self.EnhanceContrast(image)
         # reshape for k-means
         orig_shape = image.shape
         rows = image.shape[0]
@@ -139,38 +181,72 @@ class PictureGenerator:
         depth = image.shape[2]
         image = image.reshape((rows * cols, depth))
         
-        # run k-means fit
+        # run k-means fit 
         kmeans = KMeans(n_clusters=numClusters, n_init="auto", random_state=5)
-        kmeans.fit(hue_array)
+        kmeans.fit(image)
+
+        corrected_colors = cv2.cvtColor(kmeans.cluster_centers_.reshape((numClusters,1,3)).astype('uint8'), cv2.COLOR_HSV2RGB)
+        corrected_colors = corrected_colors.reshape((numClusters,3))
+
 
         # normalize compressed image
         compressed_image = kmeans.cluster_centers_[kmeans.labels_]
+        #compressed_image = corrected_colors[kmeans.labels_]
         compressed_image = np.clip(compressed_image.astype('uint8'), 0, 255)
         compressed_image = compressed_image.reshape(orig_shape)
-
-        # draw borders for colors
-        compressed_image = self.DrawBorders(compressed_image)
-
 
         labels = list(kmeans.labels_)
         centroid = np.clip(kmeans.cluster_centers_.astype('uint8'), 0, 255)
         
+        contours = tuple()
+        contour_labels = list()
+        
+        for color in range(len(centroid)):
+            contour = self.OutlineColor(compressed_image, centroid[color])
+            contours += contour
+            contour_labels.append(self.GenerateContourLabels(contour, color + 1))
+        
+        transparent_image = np.array(compressed_image, dtype=np.float)
+        transparent_image /= 255.0
+        a_channel = np.ones(orig_shape, dtype=np.float)/2.0
+        transparent_image = transparent_image * a_channel
+        
+        compressed_image = cv2.cvtColor(compressed_image, cv2.COLOR_HSV2RGB)
+        
+        white_image = np.full(orig_shape, 255, dtype='uint8')
+        
+        
+        if addTransparency:
+            compressed_image = cv2.addWeighted(white_image, 0.7, compressed_image, 0.2, 0)
+            
+        if drawContours:
+            compressed_image = cv2.drawContours(compressed_image, contours, -1, (0,0,0), 1)
+        
+        if showNumbers:
+            for color in contour_labels:
+                for contour_label in color:
+                    cv2.putText(compressed_image, str(contour_label[2]), (contour_label[0], contour_label[1]), cv2.FONT_HERSHEY_COMPLEX_SMALL, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
+        
+        
+        compressed_image = cv2.cvtColor(compressed_image, cv2.COLOR_BGR2RGB)
+        
+             
+        
         # save compresed image
         _, image_name = os.path.split(imagePath)
+        image_name, _ = image_name.split('.')
         cv2.imwrite(resultPath + image_name + '_' + str(numClusters) + '.png', compressed_image)
 
+        # show final image
+        if showImage:
+            cv2.imshow("Compressed Image", compressed_image)
 
         # Save color pallete 
         if showColors:
             plt.rcParams['figure.figsize'] = (20, 12)
-            percent = [1/len(labels)] * len(centroid) #even color sizes
-            pieLabels = [self.CreateColorLabel(x + 1, centroid[x]) for x in range(len(centroid))]
-            plt.pie(percent, colors = np.array(centroid/255), labels = pieLabels)
+            percent = [1/len(labels)] * len(corrected_colors) #even color sizes
+            pieLabels = [self.CreateColorLabel(x + 1, corrected_colors[x]) for x in range(len(corrected_colors))]
+            plt.pie(percent, colors = np.array(corrected_colors/255), labels = pieLabels)
             plt.savefig(resultPath + image_name + '_' + str(numClusters) +'_color_guide.png')
             plt.show()
             
-
-        # show final image
-        if showImage:
-            plt.imshow(compressed_image)
-            plt.show()

@@ -17,4 +17,4 @@ if __name__ == "__main__":
     #GeneratePaintByNumber.run()
     
     paint = pgen.PictureGenerator()
-    paint.PerformKMeans(".\\images\\beth2.jpg", ".\\results\\", 40, False, True)
+    paint.PerformKMeans(".\\images\\beth_upsidedown.jpg", ".\\results\\", 24, True, True, True, False, False)
